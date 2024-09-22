@@ -49,11 +49,17 @@ usando webhooks. Desarrollado con
 
 ## Uso
 
-Para ejecutar el programa simplemente ejecuta:
+Para iniciar el programa simplemente ejecuta:
 
 ```bash
 python main.py
 ```
+
+**Importante**: la primera vez se solicitarán los siguientes datos:
+
+- Número de teléfono
+- Código de inicio de sesión
+- Contraseña (si aplica)
 
 ### IDs y URLs
 
