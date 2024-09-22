@@ -13,67 +13,85 @@ logger = logging.getLogger("main")
 
 with open("config.json") as f:
     CONFIG = json.load(f)
+try:
+    API_ID = int(CONFIG["api_id"])
+    API_HASH = str(CONFIG["api_hash"])
+    CHATS: dict = CONFIG["chats"]
+except KeyError as e:
+    logger.error(f"Missing required field '{e.args[0]}' in config.json")
+    exit(1)
 
-API_ID = int(CONFIG["api_id"])
-API_HASH = str(CONFIG["api_hash"])
-IBB_KEY = str(CONFIG["ibb_key"])
-MAX_SIZE = int(CONFIG["max_size"]) * 1024 * 1024
-PPHOTO_EXPIRATION = int(CONFIG["pphoto_expiration"]) * 24 * 60 * 60
-WEBHOOKS: dict = CONFIG["webhooks"]
-CHATS = list(map(int, keys)) if "*" not in (keys := WEBHOOKS.keys()) else None
+IBB_KEY = str(CONFIG.get("ibb_key", ""))
+IBB_EXPIRATION = int(CONFIG.get("ibb_expiration", 7)) * 24 * 60 * 60
+MAX_SIZE = int(CONFIG.get("max_size", 10)) * 1024 * 1024
+CHATS_IDS = list(map(int, keys)) if "*" not in (keys := CHATS.keys()) else None
 
 client = TelegramClient("anon", API_ID, API_HASH)
 session = None
 
 
-@client.on(events.NewMessage(chats=CHATS))
+@client.on(events.NewMessage(chats=CHATS_IDS))
 async def new_message(event: events.NewMessage.Event):
     chat = await event.get_chat()
     sender = await event.get_sender()
-    target = WEBHOOKS.get(str(chat.id)) or WEBHOOKS.get("*")
-    if target:
-        author = f" @{sender.username}" if sender.username else ""
-        data = {
-            "username": utils.get_display_name(chat) + author,
-            "content": f"{event.text}",
-        }
-        if IBB_KEY:
-            data["avatar_url"] = await get_profile_photo_url(chat)
-        if event.message.file:
-            filename = event.message.file.name or f"file.{event.message.file.ext}"
-            if event.message.file.size <= MAX_SIZE:
-                blob = await event.message.download_media(bytes)
-                data[filename] = blob
-            else:
-                logger.warning(
-                    f"File {filename} exceeds maximum size of {MAX_SIZE / 1024 / 1024} MB"
-                )
+    try:
+        config = CHATS.get(str(chat.id)) or CHATS["*"]
+        targets = config["webhooks"]
+    except KeyError as e:
+        logger.error(f"Missing required field '{e.args[0]}' in config.json")
+        return
+    ignore_usernames = config.get("ignore_users", [])
+    if sender.username in ignore_usernames:
+        logger.info(f"User @{sender.username} ignored")
+        return
+    author = f" @{sender.username}" if sender.username else ""
+    d_username = utils.get_display_name(chat) + author
+    data = {
+        "username": d_username,
+        "content": event.text,
+    }
+    if IBB_KEY:
+        data["avatar_url"] = await get_profile_photo_url(chat)
+    if event.message.file:
+        filename = event.message.file.name or f"file.{event.message.file.ext}"
+        if event.message.file.size <= MAX_SIZE:
+            blob = await event.message.download_media(bytes)
+            data[filename] = blob
+        else:
+            logger.warning(
+                f"File {filename} exceeds maximum size of {MAX_SIZE / 1024 / 1024} MB"
+            )
+    for target in targets:
         async with session.post(target, data=data) as r:
             if r.status in (200, 204):
-                logger.info("Forwarded message")
+                logger.info(f"Forwarded message from {d_username}")
             else:
-                logger.error(f"Failed to forward message ({r.status})")
+                logger.error(f"Error forwarding message from {d_username} ({r.status})")
 
 
-async def get_profile_photo_url(entity):
-    if not hasattr(entity.photo, "photo_id"):
-        return ""
-    filename = f"{entity.id}-{entity.photo.photo_id}.jpg"
+def load_cache() -> dict:
+    cache = {}
     try:
         with open("cache.json") as f:
             try:
                 cache = json.load(f)
             except json.JSONDecodeError as e:
                 # ¿abortar o sobrescribir?
-                while opt := input("cache.json corrupted. Overwrite? [y/n]: ").lower():
+                while opt := input("cache.json corrupted. Overwrite? (y/n): ").lower():
                     if opt == "y":
-                        cache = {}
                         break
                     elif opt == "n":
                         raise e
-    except FileNotFoundError as e:
+    except FileNotFoundError:
         logger.info("cache.json not found")
-        cache = {}
+    return cache
+
+
+async def get_profile_photo_url(entity):
+    if not hasattr(entity.photo, "photo_id"):
+        return ""
+    filename = f"{entity.id}-{entity.photo.photo_id}.jpg"
+    cache = load_cache()
     code = cache.get(filename, "0")
     url = f"https://i.ibb.co/{code}/{filename}"
     async with session.get(url) as r1:
@@ -83,7 +101,7 @@ async def get_profile_photo_url(entity):
         data = {
             "key": IBB_KEY,
             "name": filename,
-            "expiration": str(PPHOTO_EXPIRATION),
+            "expiration": str(IBB_EXPIRATION),
             "image": await client.download_profile_photo(entity, bytes),
         }
         async with session.post("https://api.imgbb.com/1/upload", data=data) as r2:

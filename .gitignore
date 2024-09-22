@@ -3,3 +3,4 @@
 config.json
 cache.json
 *.session
+*.session-journal

@@ -2,9 +2,17 @@
   "api_id": 1234,
   "api_hash": "abcd",
   "ibb_key": "",
+  "ibb_expiration": 7,
   "max_size": 10,
-  "pphoto_expiration": 7,
-  "webhooks": {
-    "5678": "https://discord.com/api/webhooks/9012/wxyz"
+  "chats": {
+    "5678": {
+      "comment": "Para identificar el ID",
+      "ignore_users": [
+        "abc123_bot"
+      ],
+      "webhooks": [
+        "https://discord.com/api/webhooks/9012/wxyz"
+      ]
+    }
   }
 }
