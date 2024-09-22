@@ -1,0 +1,10 @@
+{
+  "api_id": 1234,
+  "api_hash": "abcd",
+  "ibb_key": "efgh",
+  "max_size": 10,
+  "pphoto_expiration": 7,
+  "webhooks": {
+    "5678": "https://discord.com/api/webhooks/9012/wxyz"
+  }
+}
