@@ -32,10 +32,10 @@ async def new_message(event: events.NewMessage.Event):
     sender = await event.get_sender()
     target = WEBHOOKS.get(str(chat.id)) or WEBHOOKS.get("*")
     if target:
-        author = f"```@{sender.username}```\n" if sender.username else ""
+        author = f" @{sender.username}" if sender.username else ""
         data = {
-            "username": utils.get_display_name(chat),
-            "content": f"{author}{event.text}",
+            "username": utils.get_display_name(chat) + author,
+            "content": f"{event.text}",
         }
         if IBB_KEY:
             data["avatar_url"] = await get_profile_photo_url(chat)
