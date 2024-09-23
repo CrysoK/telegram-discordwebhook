@@ -3,7 +3,8 @@ import argparse
 import logging
 import json
 import aiohttp
-from telethon import TelegramClient, events, utils
+from telethon import TelegramClient, events, utils, types
+from telethon.extensions import markdown
 
 logging.basicConfig(
     format="[%(levelname)8s|%(asctime)s] %(name)s: %(message)s",
@@ -26,7 +27,35 @@ IBB_EXPIRATION = int(CONFIG.get("ibb_expiration", 7)) * 24 * 60 * 60
 MAX_SIZE = int(CONFIG.get("max_size", 10)) * 1024 * 1024
 CHATS_IDS = list(map(int, keys)) if "*" not in (keys := CHATS.keys()) else None
 
+
+class MarkdownNoEmbeds:
+    @staticmethod
+    def parse(text):
+        return markdown.parse(text)
+
+    @staticmethod
+    def unparse(text, entities):
+        """Convierte `https://example.com` a `<https://example.com>` y
+        `[example](https://example.com)` a `[example](<https://example.com>)`
+        """
+        new_text = list(text)
+        offset_correction = 0
+        for e in entities or []:
+            if isinstance(e, types.MessageEntityUrl):
+                start = e.offset + offset_correction
+                end = start + e.length
+                new_text.insert(start, "<")
+                new_text.insert(end + 1, ">")
+                offset_correction += 2
+                e.length = e.length + 2
+                e.offset = start
+            if isinstance(e, types.MessageEntityTextUrl):
+                e.url = f"<{e.url}>"
+        return markdown.unparse("".join(new_text), entities)
+
+
 client = TelegramClient("anon", API_ID, API_HASH)
+client.parse_mode = MarkdownNoEmbeds()  # ¿Hacerlo opcional? ¿Por cada Chat?
 session = None
 
 
