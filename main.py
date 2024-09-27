@@ -1,16 +1,12 @@
 # python 3.8+
 import argparse
-import logging
+
 import json
 import aiohttp
 from telethon import TelegramClient, events, utils, types
 from telethon.extensions import markdown
 
-logging.basicConfig(
-    format="[%(levelname)8s|%(asctime)s] %(name)s: %(message)s",
-    level=logging.INFO,
-)
-logger = logging.getLogger("main")
+from src.logger import logger
 
 with open("config.json") as f:
     CONFIG = json.load(f)
