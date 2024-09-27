@@ -69,8 +69,8 @@ async def new_message(event: events.NewMessage.Event):
             logger.warning(
                 f"File {filename} exceeds maximum size of {TelegramSettings.IMAGE_MAX_SIZE / 1024 / 1024} MB"
             )
-    for target in config.webhooks:
-        async with session.post(target, data=data) as r:
+    for webhook in config.webhooks:
+        async with session.post(webhook, data=data) as r:
             if r.status in (200, 204):
                 logger.info(f"Forwarded message from {d_username}")
             else:
