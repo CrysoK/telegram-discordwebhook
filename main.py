@@ -7,21 +7,8 @@ from telethon import TelegramClient, events, utils, types
 from telethon.extensions import markdown
 
 from src.logger import logger
-
-with open("config.json") as f:
-    CONFIG = json.load(f)
-try:
-    API_ID = int(CONFIG["api_id"])
-    API_HASH = str(CONFIG["api_hash"])
-    CHATS: dict = CONFIG["chats"]
-except KeyError as e:
-    logger.error(f"Missing required field '{e.args[0]}' in config.json")
-    exit(1)
-
-IBB_KEY = str(CONFIG.get("ibb_key", ""))
-IBB_EXPIRATION = int(CONFIG.get("ibb_expiration", 7)) * 24 * 60 * 60
-MAX_SIZE = int(CONFIG.get("max_size", 10)) * 1024 * 1024
-CHATS_IDS = list(map(int, keys)) if "*" not in (keys := CHATS.keys()) else None
+from src.settings.telegram import TelegramSettings
+from src.settings.ibb import IBBSettings
 
 
 class MarkdownNoEmbeds:
@@ -50,44 +37,40 @@ class MarkdownNoEmbeds:
         return markdown.unparse("".join(new_text), entities)
 
 
-client = TelegramClient("anon", API_ID, API_HASH)
+client = TelegramClient("anon", TelegramSettings.API_ID, TelegramSettings.API_HASH)
 client.parse_mode = MarkdownNoEmbeds()  # ¿Hacerlo opcional? ¿Por cada Chat?
 session = None
 
 
-@client.on(events.NewMessage(chats=CHATS_IDS))
+@client.on(events.NewMessage(chats=TelegramSettings.chats))
 async def new_message(event: events.NewMessage.Event):
     chat = await event.get_chat()
     sender = await event.get_sender()
-    try:
-        config = CHATS.get(str(chat.id)) or CHATS["*"]
-        targets = config["webhooks"]
-    except KeyError as e:
-        logger.error(f"Missing required field '{e.args[0]}' in config.json")
-        return
-    ignore_usernames = config.get("ignore_users", [])
-    if sender.username in ignore_usernames:
+    config = TelegramSettings.get_chat(id=int(chat.id))
+
+    if sender.username in config.ignore_users:
         logger.info(f"User @{sender.username} ignored")
         return
+
     author = f" @{sender.username}" if sender.username else ""
     d_username = utils.get_display_name(chat) + author
     data = {
         "username": d_username,
         "content": event.text,
     }
-    if IBB_KEY:
+    if IBBSettings.KEY:
         data["avatar_url"] = await get_profile_photo_url(chat)
     if event.message.file:
         filename = event.message.file.name or f"file.{event.message.file.ext}"
-        if event.message.file.size <= MAX_SIZE:
+        if event.message.file.size <= TelegramSettings.IMAGE_MAX_SIZE:
             blob = await event.message.download_media(bytes)
             data[filename] = blob
         else:
             logger.warning(
-                f"File {filename} exceeds maximum size of {MAX_SIZE / 1024 / 1024} MB"
+                f"File {filename} exceeds maximum size of {TelegramSettings.IMAGE_MAX_SIZE / 1024 / 1024} MB"
             )
-    for target in targets:
-        async with session.post(target, data=data) as r:
+    for webhook in config.webhooks:
+        async with session.post(webhook, data=data) as r:
             if r.status in (200, 204):
                 logger.info(f"Forwarded message from {d_username}")
             else:
@@ -118,18 +101,18 @@ async def get_profile_photo_url(entity):
     filename = f"{entity.id}-{entity.photo.photo_id}.jpg"
     cache = load_cache()
     code = cache.get(filename, "0")
-    url = f"https://i.ibb.co/{code}/{filename}"
+    url = IBBSettings.URL.unicode_string() + f"{code}/{filename}"
     async with session.get(url) as r1:
         if r1.status == 200:
             return url
         logger.info(f"Cache miss: {filename}")
         data = {
-            "key": IBB_KEY,
+            "key": IBBSettings.KEY,
             "name": filename,
-            "expiration": str(IBB_EXPIRATION),
+            "expiration": str(IBBSettings.EXPIRATION),
             "image": await client.download_profile_photo(entity, bytes),
         }
-        async with session.post("https://api.imgbb.com/1/upload", data=data) as r2:
+        async with session.post(IBBSettings.UPLOAD_ENDPOINT.unicode_string(), data=data) as r2:
             if r2.status == 200:
                 info = (await r2.json())["data"]
                 url = info["url"]
