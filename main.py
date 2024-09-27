@@ -1,169 +1,213 @@
-# python 3.8+
-import argparse
 import logging
-import json
-import aiohttp
-from telethon import TelegramClient, events, utils, types
-from telethon.extensions import markdown
+from os import environ
+from typing import Optional
+from discord import Bot, ApplicationContext, TextChannel
+from discord.ext import tasks
+from dotenv import load_dotenv
+from telethon import TelegramClient, utils
+from telethon.errors import SessionPasswordNeededError
+from peewee import SqliteDatabase, DoesNotExist
+from models import Config, Chat
+from telegram import start
+
+
+load_dotenv()
+
+DISCORD_TOKEN = environ["DISCORD_TOKEN"]
+DEBUG = bool(environ.get("DEBUG"))
+DEBUG_GUILDS = [698632015162900522]
+SESSION_NAME = "tg"
+SQLITE_DB = "bot.db"
 
 logging.basicConfig(
-    format="[%(levelname)8s|%(asctime)s] %(name)s: %(message)s",
+    format="[%(asctime)s %(levelname)s %(name)s] %(message)s",
     level=logging.INFO,
 )
 logger = logging.getLogger("main")
+logger.setLevel(logging.DEBUG if DEBUG else logging.INFO)
 
-with open("config.json") as f:
-    CONFIG = json.load(f)
-try:
-    API_ID = int(CONFIG["api_id"])
-    API_HASH = str(CONFIG["api_hash"])
-    CHATS: dict = CONFIG["chats"]
-except KeyError as e:
-    logger.error(f"Missing required field '{e.args[0]}' in config.json")
-    exit(1)
-
-IBB_KEY = str(CONFIG.get("ibb_key", ""))
-IBB_EXPIRATION = int(CONFIG.get("ibb_expiration", 7)) * 24 * 60 * 60
-MAX_SIZE = int(CONFIG.get("max_size", 10)) * 1024 * 1024
-CHATS_IDS = list(map(int, keys)) if "*" not in (keys := CHATS.keys()) else None
+bot = Bot(debug_guilds=DEBUG_GUILDS if DEBUG else None)
+tg: TelegramClient = None
+db = SqliteDatabase(SQLITE_DB)
+db.bind([Config, Chat])
+last_code_hash = None
 
 
-class MarkdownNoEmbeds:
-    @staticmethod
-    def parse(text):
-        return markdown.parse(text)
-
-    @staticmethod
-    def unparse(text, entities):
-        """Convierte `https://example.com` a `<https://example.com>` y
-        `[example](https://example.com)` a `[example](<https://example.com>)`
-        """
-        new_text = list(text)
-        offset_correction = 0
-        for e in entities or []:
-            if isinstance(e, types.MessageEntityUrl):
-                start = e.offset + offset_correction
-                end = start + e.length
-                new_text.insert(start, "<")
-                new_text.insert(end + 1, ">")
-                offset_correction += 2
-                e.length = e.length + 2
-                e.offset = start
-            if isinstance(e, types.MessageEntityTextUrl):
-                e.url = f"<{e.url}>"
-        return markdown.unparse("".join(new_text), entities)
-
-
-client = TelegramClient("anon", API_ID, API_HASH)
-client.parse_mode = MarkdownNoEmbeds()  # ¿Hacerlo opcional? ¿Por cada Chat?
-session = None
-
-
-@client.on(events.NewMessage(chats=CHATS_IDS))
-async def new_message(event: events.NewMessage.Event):
-    chat = await event.get_chat()
-    sender = await event.get_sender()
+@tasks.loop()
+async def start_telegram():
+    global tg
+    config = Config.get(id=0)
     try:
-        config = CHATS.get(str(chat.id)) or CHATS["*"]
-        targets = config["webhooks"]
-    except KeyError as e:
-        logger.error(f"Missing required field '{e.args[0]}' in config.json")
+        tg = TelegramClient(SESSION_NAME, config.api_id, config.api_hash)
+        await tg.connect()
+        logger.info("Connected to Telegram")
+        if await tg.is_user_authorized():
+            logger.info("Logged in to Telegram")
+            await start(tg, bot, db)
+    except ValueError:
+        logger.info("Not connected to Telegram")
+        start_telegram.stop()
+
+
+@start_telegram.before_loop
+async def before_start_telegram():
+    await bot.wait_until_ready()
+
+
+@bot.event
+async def on_ready():
+    db.connect(reuse_if_open=True)
+    db.create_tables([Config, Chat])
+    Config.get_or_create(id=0)
+    start_telegram.start()
+    logger.info(f"Logged in as {bot.user} (ID: {bot.user.id})")
+    db.close()
+
+
+@bot.command()
+async def ping(ctx):
+    """Bot latency."""
+    await ctx.respond(f"Pong! Latency: {bot.latency}")
+
+
+@bot.command()
+async def credentials(ctx: ApplicationContext, api_id: int, api_hash: str):
+    """Set Telegram API credentials."""
+    await ctx.defer(ephemeral=True)
+    db.connect(reuse_if_open=True)
+    config = Config.get(id=0)
+    config.api_id = api_id
+    config.api_hash = api_hash
+    config.save()
+    db.close()
+    await ctx.respond("Credentials saved.", ephemeral=True)
+
+
+@bot.command()
+async def media_config(
+    ctx: ApplicationContext,
+    ibb_key: Optional[str],
+    ibb_expiration: Optional[int],
+    max_size: Optional[int],
+):
+    """Set media related options."""
+    await ctx.defer(ephemeral=True)
+    db.connect(reuse_if_open=True)
+    config = Config.get(id=0)
+    if ibb_key:
+        config.ibb_key = ibb_key
+    if ibb_expiration:
+        config.ibb_expiration = ibb_expiration
+    if max_size:
+        config.max_size = max_size
+    config.save()
+    db.close()
+    await ctx.respond("Media options saved.", ephemeral=True)
+
+
+@bot.command()
+async def add_chat(
+    ctx: ApplicationContext,
+    chat_id: int,
+    channel: TextChannel,
+    chat_name: Optional[str],
+):
+    """Add a chat to the list of monitored chats."""
+    await ctx.defer(ephemeral=True)
+    db.connect(reuse_if_open=True)
+    logger.info(
+        Chat.insert(
+            id=chat_id, comment=chat_name, ignore_users=[], channels=[channel.id]
+        )
+    )
+    db.close()
+    await ctx.respond("Chat added.", ephemeral=True)
+
+
+@bot.command()
+async def list_chats(ctx: ApplicationContext):
+    """List monitored chats."""
+    await ctx.defer(ephemeral=True)
+    db.connect(reuse_if_open=True)
+    for t in db.get_tables():
+        logger.info(t)
+        logger.info([c.name for c in db.get_columns(t)])
+        logger.info(db.execute_sql(f"SELECT * FROM {t}").fetchall())
+    chats = list(Chat.select())
+    db.close()
+    await ctx.respond(f"{chats}", ephemeral=True)
+
+
+@bot.command()
+async def login(ctx: ApplicationContext, phone: str, login_code: Optional[str]):
+    """Login to Telegram."""
+    global tg
+    await ctx.defer(ephemeral=True)
+    config = Config.get(id=0)
+    tg = TelegramClient(SESSION_NAME, config.api_id, config.api_hash)
+    await tg.connect()
+    if await tg.is_user_authorized():
+        start_telegram.start()
+        return await ctx.respond("Already logged in.", ephemeral=True)
+    await tg.send_code_request(phone)
+    if not login_code:
+        return await ctx.respond("Rerun command with login code.", ephemeral=True)
+    try:
+        await tg.sign_in(phone, login_code)
+    except ValueError as e:
+        return await ctx.respond(f"```{e}```", ephemeral=True)
+    except SessionPasswordNeededError:
+        return await ctx.respond("2FA accounts are not supported.", ephemeral=True)
+    if not await tg.is_user_authorized():
+        return await ctx.respond("Login failed.", ephemeral=True)
+    await ctx.respond("Login successful.", ephemeral=True)
+    start_telegram.start()
+
+
+@bot.command()
+async def logout(ctx: ApplicationContext):
+    """Logout from Telegram."""
+    if not tg:
+        await ctx.respond("Not logged in.", ephemeral=True)
         return
-    ignore_usernames = config.get("ignore_users", [])
-    if sender.username in ignore_usernames:
-        logger.info(f"User @{sender.username} ignored")
+    start_telegram.stop()
+    await tg.log_out()
+    await ctx.respond("Logout successful.", ephemeral=True)
+
+
+@bot.command()
+async def status(ctx: ApplicationContext):
+    """Telegram login status."""
+    if not tg or not await tg.is_user_authorized():
+        await ctx.respond("Not logged in.", ephemeral=True)
         return
-    author = f" @{sender.username}" if sender.username else ""
-    d_username = utils.get_display_name(chat) + author
-    data = {
-        "username": d_username,
-        "content": event.text,
-    }
-    if IBB_KEY:
-        data["avatar_url"] = await get_profile_photo_url(chat)
-    if event.message.file:
-        filename = event.message.file.name or f"file.{event.message.file.ext}"
-        if event.message.file.size <= MAX_SIZE:
-            blob = await event.message.download_media(bytes)
-            data[filename] = blob
-        else:
-            logger.warning(
-                f"File {filename} exceeds maximum size of {MAX_SIZE / 1024 / 1024} MB"
-            )
-    for target in targets:
-        async with session.post(target, data=data) as r:
-            if r.status in (200, 204):
-                logger.info(f"Forwarded message from {d_username}")
-            else:
-                logger.error(f"Error forwarding message from {d_username} ({r.status})")
+    await ctx.respond("Logged in.", ephemeral=True)
 
 
-def load_cache() -> dict:
-    cache = {}
-    try:
-        with open("cache.json") as f:
-            try:
-                cache = json.load(f)
-            except json.JSONDecodeError as e:
-                # ¿abortar o sobrescribir?
-                while opt := input("cache.json corrupted. Overwrite? (y/n): ").lower():
-                    if opt == "y":
-                        break
-                    elif opt == "n":
-                        raise e
-    except FileNotFoundError:
-        logger.info("cache.json not found")
-    return cache
+@bot.command()
+async def myself(ctx: ApplicationContext):
+    """Get information about your Telegram account."""
+    if not tg:
+        await ctx.respond("Not logged in.", ephemeral=True)
+        return
+    await ctx.defer(ephemeral=True)
+    me = await tg.get_me()
+    await ctx.respond(f"```{me.stringify()}```", ephemeral=True)
 
 
-async def get_profile_photo_url(entity):
-    if not hasattr(entity.photo, "photo_id"):
-        return ""
-    filename = f"{entity.id}-{entity.photo.photo_id}.jpg"
-    cache = load_cache()
-    code = cache.get(filename, "0")
-    url = f"https://i.ibb.co/{code}/{filename}"
-    async with session.get(url) as r1:
-        if r1.status == 200:
-            return url
-        logger.info(f"Cache miss: {filename}")
-        data = {
-            "key": IBB_KEY,
-            "name": filename,
-            "expiration": str(IBB_EXPIRATION),
-            "image": await client.download_profile_photo(entity, bytes),
-        }
-        async with session.post("https://api.imgbb.com/1/upload", data=data) as r2:
-            if r2.status == 200:
-                info = (await r2.json())["data"]
-                url = info["url"]
-                code = url.split("/")[3]
-                cache[filename] = code
-                with open("cache.json", "w") as f:
-                    json.dump(cache, f, indent=2)
-                return url
-            logger.error(f"Failed to upload image ({r2.status})")
-    return ""
+@bot.command()
+async def list_dialogs(ctx: ApplicationContext):
+    if not await logged_in():
+        await ctx.respond("Not logged in.", ephemeral=True)
+        return
+    dialogs = ""
+    async for dialog in tg.iter_dialogs():
+        dialogs += f"- {dialog.name} `{utils.resolve_id(dialog.id)[0]}`\n"
+    await ctx.respond(dialogs, ephemeral=True)
 
 
-async def main(args):
-    await client.catch_up()
-    global session
-    session = aiohttp.ClientSession()
-    if args.list:
-        async for chat in client.iter_dialogs():
-            print(f"Chat: {chat.name} ID: {utils.resolve_id(chat.id)[0]}")
-    else:
-        await client.run_until_disconnected()
-    await session.close()
+async def logged_in():
+    return tg and await tg.is_user_authorized()
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("-l", "--list", action="store_true", help="List chats IDs")
-    args = parser.parse_args()
-    try:
-        with client:
-            client.loop.run_until_complete(main(args))
-    except KeyboardInterrupt:
-        pass
+bot.run(DISCORD_TOKEN)

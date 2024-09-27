@@ -1,2 +1,5 @@
-telethon==1.36
-aiohttp==3.10
+py-cord~=2.6
+telethon~=1.36
+peewee~=3.17
+aiohttp~=3.10
+python-dotenv

@@ -1,6 +1,9 @@
 .venv
 .vscode
-config.json
-cache.json
+.env
+*.db
 *.session
 *.session-journal
+__pycache__
+config.json
+ignore
